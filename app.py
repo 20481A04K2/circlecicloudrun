@@ -7,4 +7,4 @@ def hello():
     return "✅ Hello from Flask on GCP VM via Docker & CircleCI!"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80)
+    app.run(host="0.0.0.0", port=8080)
