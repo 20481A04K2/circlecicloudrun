@@ -9,6 +9,12 @@ executors:
     docker:
       - image: google/cloud-sdk:slim
 
+# Common environment for GCP jobs
+environment_defaults: &gcp_env
+  GCP_PROJECT_ID: sylvan-hydra-464904-d9
+  GCP_REGION: asia-east1
+  ARTIFACT_REPO_NAME: vamsi-artifact
+  CLOUD_RUN_SERVICE_NAME: flask-service
 
 jobs:
   test:
@@ -21,53 +27,60 @@ jobs:
             pip install pylint
             pylint app.py --disable=import-error || true
 
-  build-and-deploy:
+  build:
     executor: custom-gcloud
-    environment:
-      ARTIFACT_REPO_NAME: vamsi-artifact
-      CLOUD_RUN_SERVICE_NAME: flask-service
-      GCP_REGION: asia-east1
+    environment: *gcp_env
     steps:
       - checkout
-
-      - run:
-          name: ✅ Validate required environment variables
-          shell: /bin/bash
-          command: |
-            REQUIRED_VARS=("GCP_SA_KEY_B64" "GCP_PROJECT_ID" "GCP_REGION" "ARTIFACT_REPO_NAME" "CLOUD_RUN_SERVICE_NAME")
-            for i in "${REQUIRED_VARS[@]}"; do
-              if [[ -z "${!i}" ]]; then
-                echo "❌ ERROR: Missing environment variable $i"
-                exit 1
-              else
-                echo "✅ $i is set"
-              fi
-            done
-
       - run:
           name: 🔐 Authenticate with GCP
           command: |
             echo "$GCP_SA_KEY_B64" | base64 -d > gcloud-key.json
             gcloud auth activate-service-account --key-file=gcloud-key.json
             gcloud config set project "$GCP_PROJECT_ID"
-            gcloud config set artifacts/location "$GCP_REGION"
+
+      - run:
+          name: ⚙️ Build Docker image
+          command: |
+            export IMAGE_NAME="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO_NAME/$CLOUD_RUN_SERVICE_NAME"
+            docker build -t "$IMAGE_NAME" .
+
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  push:
+    executor: custom-gcloud
+    environment: *gcp_env
+    steps:
+      - attach_workspace:
+          at: .
+      - run:
+          name: 🔐 Authenticate & Push Image
+          command: |
+            echo "$GCP_SA_KEY_B64" | base64 -d > gcloud-key.json
+            gcloud auth activate-service-account --key-file=gcloud-key.json
+            gcloud config set project "$GCP_PROJECT_ID"
+            gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+
+            export IMAGE_NAME="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO_NAME/$CLOUD_RUN_SERVICE_NAME"
+            docker push "$IMAGE_NAME"
+
+  deploy:
+    executor: custom-gcloud
+    environment: *gcp_env
+    steps:
+      - run:
+          name: 🔐 Authenticate with GCP
+          command: |
+            echo "$GCP_SA_KEY_B64" | base64 -d > gcloud-key.json
+            gcloud auth activate-service-account --key-file=gcloud-key.json
+            gcloud config set project "$GCP_PROJECT_ID"
             gcloud config set run/region "$GCP_REGION"
 
       - run:
-          name: 🧪 Enable required services
-          command: |
-            gcloud services enable run.googleapis.com artifactregistry.googleapis.com
-
-      - run:
-          name: ⚙️ Build & Push Docker image to Artifact Registry
-          command: |
-            export IMAGE_NAME="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO_NAME/$CLOUD_RUN_SERVICE_NAME"
-            gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
-            docker build -t "$IMAGE_NAME" .
-            docker push "$IMAGE_NAME"
-
-      - run:
-          name: 🚀 Deploy or Update Cloud Run Service
+          name: 🚀 Deploy to Cloud Run
           command: |
             export IMAGE_NAME="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO_NAME/$CLOUD_RUN_SERVICE_NAME"
             gcloud run deploy "$CLOUD_RUN_SERVICE_NAME" \
@@ -78,9 +91,15 @@ jobs:
 
 workflows:
   version: 2
-  test-build-deploy:
+  test-build-push-deploy:
     jobs:
       - test
-      - build-and-deploy:
+      - build:
           requires:
             - test
+      - push:
+          requires:
+            - build
+      - deploy:
+          requires:
+            - push
