@@ -5,6 +5,10 @@ executors:
     docker:
       - image: circleci/python:3.9
 
+  custom-gcloud:
+    docker:
+      - image: google/cloud-sdk:slim
+
 # Common GCP variables
 environment_defaults: &gcp_env
   GCP_PROJECT_ID: sylvan-hydra-464904-d9
@@ -57,10 +61,8 @@ jobs:
             docker push "$IMAGE_NAME"
 
   deploy:
-    executor: custom-gcloud
+    executor: custom-gcloud  # ✅ Now this works because it's defined above
     environment: *gcp_env
-    docker:
-      - image: google/cloud-sdk:slim
     steps:
       - run:
           name: 🔐 Authenticate & Deploy to Cloud Run
