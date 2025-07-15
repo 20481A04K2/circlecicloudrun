@@ -5,7 +5,7 @@ executors:
     docker:
       - image: circleci/python:3.9
 
-# Common GCP environment variables
+# Common GCP variables
 environment_defaults: &gcp_env
   GCP_PROJECT_ID: sylvan-hydra-464904-d9
   GCP_REGION: asia-east1
@@ -23,7 +23,7 @@ jobs:
             pip install pylint
             pylint app.py --disable=import-error || true
 
-  build:
+  build-and-push:
     machine:
       image: ubuntu-2204:2023.10.1
     environment: *gcp_env
@@ -31,11 +31,17 @@ jobs:
       - checkout
 
       - run:
-          name: 🔐 Install gcloud & Authenticate
+          name: 🔐 Install gcloud SDK & Authenticate
           command: |
-            sudo apt-get update && sudo apt-get install -y curl apt-transport-https gnupg unzip
-            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
-            curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+            sudo apt-get update && sudo apt-get install -y curl apt-transport-https gnupg lsb-release
+
+            curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+              gpg --dearmor | \
+              sudo tee /usr/share/keyrings/cloud.google.gpg > /dev/null
+
+            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | \
+              sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+
             sudo apt-get update && sudo apt-get install -y google-cloud-sdk
 
             echo "$GCP_SA_KEY_B64" | base64 -d > gcloud-key.json
@@ -43,60 +49,29 @@ jobs:
             gcloud config set project "$GCP_PROJECT_ID"
 
       - run:
-          name: ⚙️ Build Docker image
+          name: ⚙️ Build & Push Docker image to Artifact Registry
           command: |
-            export IMAGE_NAME="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO_NAME/$CLOUD_RUN_SERVICE_NAME"
-            docker build -t "$IMAGE_NAME" .
-
-      - persist_to_workspace:
-          root: .
-          paths:
-            - .
-
-  push:
-    machine:
-      image: ubuntu-2204:2023.10.1
-    environment: *gcp_env
-    steps:
-      - attach_workspace:
-          at: .
-      - run:
-          name: 🔐 Install gcloud & Push Docker image
-          command: |
-            sudo apt-get update && sudo apt-get install -y curl apt-transport-https gnupg
-            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
-            curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
-            sudo apt-get update && sudo apt-get install -y google-cloud-sdk
-
-            echo "$GCP_SA_KEY_B64" | base64 -d > gcloud-key.json
-            gcloud auth activate-service-account --key-file=gcloud-key.json
-            gcloud config set project "$GCP_PROJECT_ID"
-
             export IMAGE_NAME="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO_NAME/$CLOUD_RUN_SERVICE_NAME"
             gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+            docker build -t "$IMAGE_NAME" .
             docker push "$IMAGE_NAME"
 
   deploy:
-    machine:
-      image: ubuntu-2204:2023.10.1
+    executor: custom-gcloud
     environment: *gcp_env
+    docker:
+      - image: google/cloud-sdk:slim
     steps:
       - run:
-          name: 🔐 Install gcloud & Deploy to Cloud Run
+          name: 🔐 Authenticate & Deploy to Cloud Run
           command: |
-            sudo apt-get update && sudo apt-get install -y curl apt-transport-https gnupg
-            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
-            curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
-            sudo apt-get update && sudo apt-get install -y google-cloud-sdk
-
             echo "$GCP_SA_KEY_B64" | base64 -d > gcloud-key.json
             gcloud auth activate-service-account --key-file=gcloud-key.json
             gcloud config set project "$GCP_PROJECT_ID"
             gcloud config set run/region "$GCP_REGION"
 
-            gcloud services enable run.googleapis.com artifactregistry.googleapis.com || true
-
             export IMAGE_NAME="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO_NAME/$CLOUD_RUN_SERVICE_NAME"
+
             gcloud run deploy "$CLOUD_RUN_SERVICE_NAME" \
               --image "$IMAGE_NAME" \
               --platform managed \
@@ -105,15 +80,12 @@ jobs:
 
 workflows:
   version: 2
-  test-build-push-deploy:
+  test-build-deploy:
     jobs:
       - test
-      - build:
+      - build-and-push:
           requires:
             - test
-      - push:
-          requires:
-            - build
       - deploy:
           requires:
-            - push
+            - build-and-push
